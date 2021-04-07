@@ -35,14 +35,25 @@ static void prvQueueSendTask( void *pvParameters );
 #define mainQUEUE_RECEIVE_TASK_PRIORITY     ( tskIDLE_PRIORITY + 2 )
 #define mainQUEUE_SEND_TASK_PRIORITY        ( tskIDLE_PRIORITY + 1 )
 #define mainQUEUE_LENGTH                    ( 1 )
-#define mainQUEUE_SEND_FREQUENCY_MS         ( 200 / portTICK_PERIOD_MS )
+#define mainQUEUE_SEND_FREQUENCY_MS         ( 1000 / portTICK_PERIOD_MS )
 /* The queue used by both tasks. */
 static QueueHandle_t xQueue = NULL;
+
+// The unit for voltage bounds are mV and for temperature are mili degrees Celcius.
+#define PRECISION                           1000UL
+#define VOLTAGE_LOWER_BOUND                 0UL
+#define VOLTAGE_UPPER_BOUND                 10000UL
+#define TEMPERATURE_LOWER_BOUND             -25000L
+#define TEMPERATURE_UPPER_BOUND             85000L
+
+const long VOLTAGE_RANGE = VOLTAGE_UPPER_BOUND - VOLTAGE_LOWER_BOUND;
+const long TEMPERATURE_RANGE = TEMPERATURE_UPPER_BOUND - TEMPERATURE_LOWER_BOUND;
+static long GRADIENT = (VOLTAGE_UPPER_BOUND - VOLTAGE_LOWER_BOUND) / 20UL;
 
 void main_blinky( void )
 {
     /* Create the queue. */
-    xQueue = xQueueCreate( mainQUEUE_LENGTH, sizeof( uint32_t ) );
+    xQueue = xQueueCreate( mainQUEUE_LENGTH, sizeof( uint64_t ) );
 
     if( xQueue != NULL )
     {
@@ -78,7 +89,7 @@ void main_blinky( void )
 static void prvQueueSendTask( void *pvParameters )
 {
 TickType_t xNextWakeTime;
-const uint32_t ulValueToSend = 100UL;
+uint32_t ulValueToSend = VOLTAGE_LOWER_BOUND;
 
     /* Remove compiler warning about unused parameter. */
     ( void ) pvParameters;
@@ -91,18 +102,33 @@ const uint32_t ulValueToSend = 100UL;
         /* Place this task in the blocked state until it is time to run again. */
         vTaskDelayUntil( &xNextWakeTime, mainQUEUE_SEND_FREQUENCY_MS );
 
+        // determine whether the next value should increase or decrease
+        if(ulValueToSend >= VOLTAGE_UPPER_BOUND) {
+            GRADIENT *= -1;
+        } else if (GRADIENT < 0 && ulValueToSend <= VOLTAGE_LOWER_BOUND) {
+            GRADIENT *= -1;
+        }
+
+        // modify next value to send
+        ulValueToSend += GRADIENT;
+
+        // Put tick count into message as time stamp
+        uint64_t msg = ((uint64_t)xTaskGetTickCount()) << 32;
+        // Put reading into the message
+        msg |= ulValueToSend;
+        
         /* Send to the queue - causing the queue receive task to unblock and
         toggle the LED.  0 is used as the block time so the sending operation
         will not block - it shouldn't need to block as the queue should always
         be empty at this point in the code. */
-        xQueueSend( xQueue, &ulValueToSend, 0U );
+        xQueueSend( xQueue, &msg, 0U );
     }
 }
 
 volatile uint32_t ulRxEvents = 0;
 static void prvQueueReceiveTask( void *pvParameters )
 {
-uint32_t ulReceivedValue;
+uint64_t ulReceivedValue;
 const uint32_t ulExpectedValue = 100UL;
 
     /* Remove compiler warning about unused parameter. */
@@ -115,15 +141,18 @@ const uint32_t ulExpectedValue = 100UL;
         FreeRTOSConfig.h. */
         xQueueReceive( xQueue, &ulReceivedValue, portMAX_DELAY );
 
-        /*  To get here something must have been received from the queue, but
-        is it the expected value?  If it is, toggle the LED. */
-        if( ulReceivedValue == ulExpectedValue )
-        {
-            printf("%s\n","blinking");
-            vTaskDelay(1000);
-            ulReceivedValue = 0U;
-            ulRxEvents++;
-        }
+        // Parse tick count and original reading
+        TickType_t tick = (uint32_t) (ulReceivedValue >> 32);
+        uint32_t reading = (uint32_t) ulReceivedValue;
+
+        // convert reading to temperature
+        long temperature = (reading - VOLTAGE_LOWER_BOUND) / (double)VOLTAGE_RANGE * TEMPERATURE_RANGE + TEMPERATURE_LOWER_BOUND;
+
+        // Print tick count as time stamp and temperature
+        printf("Tick %ld:\t%ld E-3 Celcius\n", tick, (long)temperature);
+
+        vTaskDelay(1000);
+        ulRxEvents++;
     }
 }
 /*-----------------------------------------------------------*/
